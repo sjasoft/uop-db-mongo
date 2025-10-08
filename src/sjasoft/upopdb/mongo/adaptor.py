@@ -195,7 +195,7 @@ class MongoUOP(database.Database):
             return self._db[name]
         return self._db.create_collection(name)  # very simple in mongo
 
-    def get_managed_collection(self, name, tenant_modifier=None):
+    def get_managed_collection(self, name, schema=None):
         """
         Gets a DBCollection of the given name.  If a tenant_id is specified then the
         DBCollection will specia
@@ -203,8 +203,8 @@ class MongoUOP(database.Database):
         :param tenant_modifier: optional fn modifying where condition for a particular tenant. .
         :return: A managed collection
         """
-        raw = self.get_raw_collection(name)
-        return MongoCollection(raw, tenant_modifier=tenant_modifier)
+        raw = self.get_raw_collection(name, schema)
+        return MongoCollection(raw)
 
     def get_standard_collection(self, kind, tenant_modifier=None):
         coll_name = database.collection_names[kind]
