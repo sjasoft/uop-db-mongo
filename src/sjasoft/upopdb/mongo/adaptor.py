@@ -2,10 +2,10 @@ __author__ = 'samantha'
 
 import random
 import pymongo
-from sjasoft.utils.cw_logging import getLogger
+from sjasoft.utils.logging import getLogger
 from sjasoft.utils.dicts import first_kv
-from uop import database
-from uop import db_collection as db_coll
+from sjasoft.uop import database
+from sjasoft.uop import db_collection as db_coll
 import re
 
 logging = getLogger('mongouop')
@@ -14,10 +14,8 @@ logging = getLogger('mongouop')
 class MongoCollection(db_coll.DBCollection):
     ID_Field = '_id'
 
-    def __init__(self, base_collection, tenant_modifier=None, indexed=False,
-                 constraint=None):
-        super().__init__(base_collection, indexed=indexed,
-                         tenant_modifier=tenant_modifier)
+    def __init__(self, base_collection, indexed=False,constraint=None):
+        super().__init__(base_collection, indexed=indexed)
 
     def column_class_check(self, column, uuid):
         regex = re.compile(f'_{uuid}$')
@@ -25,10 +23,10 @@ class MongoCollection(db_coll.DBCollection):
         return {column: cls_expr}
 
     def update(self, criteria, mods, partial=True):
-        criteria = self._with_tenant(criteria or {})
+        criteria = criteria or {}
         if partial:
             mods = {'$set': mods}
-        self._coll.update_many(self._with_tenant(criteria), mods)
+        self._coll.update_many(criteria, mods)
         self._unindex(criteria)
 
     def db_id(self, data):
@@ -62,14 +60,14 @@ class MongoCollection(db_coll.DBCollection):
     def insert(self, **object_data):
         self.db_id(object_data)
         self._index(object_data)
-        return self._coll.insert_one(self._with_tenant(object_data))
+        return self._coll.insert_one(object_data)
 
     def bulk_load(self, ids):
         return self.un_db_id(self.find({'uuid': {'$in': ids}}))
 
     def distinct(self, key, criteria):
         self.db_id(criteria)
-        res = self._coll.distinct(key, filter=self._with_tenant(criteria or {}))
+        res = self._coll.distinct(key, filter=criteria or {})
         return self.un_db_id(res)
 
     def remove(self, dict_or_key):
@@ -79,12 +77,12 @@ class MongoCollection(db_coll.DBCollection):
             criteria = {self.ID_Field: dict_or_key}
         else:
             self.db_id(criteria)
-        res = self._coll.delete_many(self._with_tenant(criteria))
+        res = self._coll.delete_many(criteria)
         return self.un_db_id(res)
 
     def count(self, criteria=None):
         self.db_id(criteria)
-        return self._coll.count_documents(self._with_tenant(criteria))
+        return self._coll.count_documents(criteria)
 
     def modified_criteria(self, criteria):
         '''
@@ -102,7 +100,7 @@ class MongoCollection(db_coll.DBCollection):
 
     def find_one(self, criteria=None):
         criteria = criteria or {}
-        filter = self._with_tenant(self.modified_criteria(criteria))
+        filter = self.modified_criteria(criteria)
         res = self._coll.find_one(filter)
         return self.un_db_id(res)
 
@@ -110,7 +108,7 @@ class MongoCollection(db_coll.DBCollection):
                    order_by=None, limit=None, ids_only=False):
         kwargs = {}
         criteria = criteria or {}
-        kwargs['filter'] = self._with_tenant(self.modified_criteria(criteria))
+        kwargs['filter'] = self.modified_criteria(criteria)
         if limit == 1:
             order_by = None
         if ids_only:
@@ -177,38 +175,21 @@ class MongoUOP(database.Database):
         self._port = args['port']
         self._db_name = dbname
         self._cached_collections = {}
+        self._session = None
         super().__init__(**kwargs)
 
     def drop_database(self):
         res = self._client.drop_database(self._db.name)
         return res
 
-    def get_raw_collection(self, name, anIndex=None):
-        '''indexed: if True then index at least on _id also on user_id if multiple_users
-        Gets a database specific collection creating any corresponding database
-        artifacts necessary to support a collection.
-        :param name: name of the collection / database artifact.
-        :param anIndex: not None then ensure the index specidief
-        :return:
-        '''
+    def get_raw_collection(self, name, schema=None):
+    
         if name in self._db.list_collection_names():
             return self._db[name]
         return self._db.create_collection(name)  # very simple in mongo
 
-    def get_managed_collection(self, name, schema=None):
-        """
-        Gets a DBCollection of the given name.  If a tenant_id is specified then the
-        DBCollection will specia
-        :param name: name of the collection
-        :param tenant_modifier: optional fn modifying where condition for a particular tenant. .
-        :return: A managed collection
-        """
-        raw = self.get_raw_collection(name, schema)
+    def wrap_raw_collection(self, raw):
         return MongoCollection(raw)
-
-    def get_standard_collection(self, kind, tenant_modifier=None):
-        coll_name = database.collection_names[kind]
-        return self.get_managed_collection(coll_name, tenant_modifier)
 
     def _db_has_collection(self, name):
         return name in self._db.list_collection_names()
@@ -228,8 +209,29 @@ class MongoUOP(database.Database):
         currently.  Many systems do nested txn by simply ignoring the nesting and only really committing at the
         top level anyway.
         """
-        pass
+        self._session = self._client.start_session()
+        self._session.start_transaction()
+        return self._session
 
+    def rollback_transaction(self):
+        """Rollback the current transaction"""
+        if self._session:
+            self._session.abort_transaction()
+            self._session.end_session()
+            self._session = None
+
+    def abort(self):
+        self.rollback_transaction()
+        super().abort()
+
+    def commit_transaction(self):
+        if self._session:
+            self._session.commit_transaction()  
+            self._session.end_session()
+            self._session = None
+
+    def really_commit(self):
+        self._session.commit_transaction()
 
 if __name__ == '__main__':
     mu = MongoUOP('foobar')
