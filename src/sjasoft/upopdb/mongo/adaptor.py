@@ -169,14 +169,13 @@ class MongoUOP(database.Database):
         client, _ = cls.get_client(**kwargs)
         client.drop_database(name)
 
-    def __init__(self, dbname, **kwargs):
-        self._client, args = self.get_client(**kwargs)
-        self._host = args['host']
-        self._port = args['port']
+    def __init__(self, dbname, tenant_id=None, *schemas,**kwargs):
         self._db_name = dbname
-        self._cached_collections = {}
         self._session = None
-        super().__init__(**kwargs)
+        self._credentials = kwargs
+        self._db = None
+        self._client = None
+        super().__init__(tenant_id=tenant_id, *schemas, **kwargs)
 
     def drop_database(self):
         res = self._client.drop_database(self._db.name)
@@ -194,9 +193,10 @@ class MongoUOP(database.Database):
     def _db_has_collection(self, name):
         return name in self._db.list_collection_names()
 
-    def open_db(self, setup=None):
+    def open_db(self):
+        self._client, args = self.get_client(**self._credentials)
         self._db = self._client.get_database(self._db_name)
-        super().open_db(setup=setup)
+        super().open_db()
 
     def commit(self):
         'as everything is pushed as we go there is not an extra commit operation'
