@@ -1,22 +1,17 @@
 [project]
-name = "sjasoft-uopdb-mongo"
+name = "uop-db-mongo"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-authors = [
-    { name = "Samantha Atkins", email = "samantha@conceptwareinc.com" }
-]
+authors = [{ name = "Samantha Atkins", email = "samantha@conceptwareinc.com" }]
 requires-python = ">=3.12"
-dependencies = [
-    "motor>=3.7.1",
-    "pymongo>=4.15.1",
-]
+dependencies = ["motor>=3.7.1", "pymongo>=4.15.1"]
 
 [project.scripts]
 sjasoft-uopdb-mongo = "sjasoft_uopdb_mongo:main"
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = { "" = "src" }
 
 
 [tool.setuptools.packages.find]
@@ -28,7 +23,4 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [dependency-groups]
-dev = [
-    "pytest>=8.4.2",
-    "pytest-asyncio>=1.2.0",
-]
+dev = ["pytest>=8.4.2", "pytest-asyncio>=1.2.0"]
