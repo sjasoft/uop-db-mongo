@@ -4,8 +4,8 @@ import random
 import pymongo
 from sjasoft.utils.logging import getLogger
 from sjasoft.utils.dicts import first_kv
-from sjasoft.uop import database
-from sjasoft.uop import db_collection as db_coll
+from uop.core import database
+from uop.core import db_collection as db_coll
 import re
 
 logging = getLogger('mongouop')
@@ -26,8 +26,8 @@ class MongoCollection(db_coll.DBCollection):
         criteria = criteria or {}
         if partial:
             mods = {'$set': mods}
-        self._coll.update_many(criteria, mods)
-        self._unindex(criteria)
+        self._coll.update_many(self.modified_criteria(criteria), mods)
+
 
     def db_id(self, data):
         if 'id' in data:
@@ -81,7 +81,7 @@ class MongoCollection(db_coll.DBCollection):
         return self.un_db_id(res)
 
     def count(self, criteria=None):
-        self.db_id(criteria)
+        criteria = self.modified_criteria(criteria or {})
         return self._coll.count_documents(criteria)
 
     def modified_criteria(self, criteria):
@@ -96,7 +96,14 @@ class MongoCollection(db_coll.DBCollection):
         if key in ('$gt', '$gte', '$lt', '$lte', '$eq', '$neq'):
             prop, val = first_kv(criteria[key])
             return {prop: {key: val}}
-        return criteria
+        elif key in ('$and', '$or', '$not'):
+            lst = []
+            for crit in criteria[key]:
+                lst.append(self.modified_criteria(crit))
+            return {key: lst}
+        elif key == 'endswith':
+            prop, val = first_kv(criteria[key])
+            return self.column_class_check(prop, val)
 
     def find_one(self, criteria=None):
         criteria = criteria or {}
@@ -105,7 +112,7 @@ class MongoCollection(db_coll.DBCollection):
         return self.un_db_id(res)
 
     def find(self, criteria=None, only_cols=None,
-                   order_by=None, limit=None, ids_only=False):
+             order_by=None, limit=None, ids_only=False):
         kwargs = {}
         criteria = criteria or {}
         kwargs['filter'] = self.modified_criteria(criteria)
@@ -169,18 +176,22 @@ class MongoUOP(database.Database):
         client, _ = cls.get_client(**kwargs)
         client.drop_database(name)
 
-    def __init__(self, dbname, tenant_id=None, *schemas,**kwargs):
+    def __init__(self, dbname, *schemas, tenant_id=None, **kwargs):
         self._db_name = dbname
         self._session = None
         self._credentials = kwargs
         self._db = None
         self._client = None
-        super().__init__(tenant_id=tenant_id, *schemas, **kwargs)
+        super().__init__(*schemas, tenant_id=tenant_id,  **kwargs)
 
     def drop_database(self):
         res = self._client.drop_database(self._db.name)
         return res
 
+    def drop_and_close(self):
+        self.drop_database(self._db.name)
+        self._client.close()
+        
     def get_raw_collection(self, name, schema=None):
     
         if name in self._db.list_collection_names():
@@ -198,11 +209,8 @@ class MongoUOP(database.Database):
         self._db = self._client.get_database(self._db_name)
         super().open_db()
 
-    def commit(self):
-        'as everything is pushed as we go there is not an extra commit operation'
-        pass
 
-    def begin_transaction(self):
+    def start_long_transaction(self):
         """
         Mongodb doesn't have transaction support.  But we can fake it by keeping reverse information for the
         set of changes to be imposed by processing changes.  Note that this mechanism will not handle nested txn
@@ -232,8 +240,5 @@ class MongoUOP(database.Database):
 
     def really_commit(self):
         self._session.commit_transaction()
+        self.end_long_transaction()
 
-if __name__ == '__main__':
-    mu = MongoUOP('foobar')
-    mu.ensure_basic_collections()
-    print(mu._collections)
