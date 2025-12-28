@@ -3,24 +3,23 @@ __author__ = 'samantha'
 import random
 import pymongo
 from sjasoft.utils.logging import getLogger
-import motor.motor_asyncio
+from pymongo import asynchronous as async_pymongo
 
 logging = getLogger('mongouop')
-from uop.core import async_database
+from uop.core import async_database, async_db_collection
 from uop.core import async_db_collection as db_coll
 from uop.db.mongo import adaptor as base
 
-class MongoCollection(base.MongoCollection):
+class MongoCollection(base.MongoCollection, async_db_collection.DBCollection):
     def __init__(self, base_collection, indexed=False, tenant_modifier=None, constraint=None):
         super().__init__(base_collection, indexed=indexed)
 
     async def update(self, criteria, mods, partial=True):
-        criteria = criteria or {}
+        criteria = self.modified_criteria(criteria or {})   
         if partial:
             mods = {'$set': mods}
-        print(criteria, mods)
-        await self._coll.update_many(self._with_tenant(criteria), mods)
-        self._unindex(criteria)
+        await self._coll.update_many(criteria, mods)
+
 
     async def ensure_index(self, *attr_order):
         '''
@@ -41,61 +40,49 @@ class MongoCollection(base.MongoCollection):
     async def update_one(self, key, mods, partial=True):
         if partial:
             mods = {'$set': mods}
-        await self._coll.update_one(self._with_tenant({'_id': key}), mods)
+        await self._coll.update_one({self.ID_Field: key}, mods)
 
     async def insert(self, **object_data):
         self.db_id(object_data)
         self._index(object_data)
-        return await self._coll.insert_one(self._with_tenant(object_data))
+        return await self._coll.insert_one(object_data)
 
     async def bulk_load(self, ids):
-        return await self.un_db_id(self.find({'uuid': {'$in': ids}}))
+        res = await self.find({self.ID_Field: {'$in': ids}})
+        return self.un_db_id(res)
 
     async def replace_one(self, key, mods):
-        return await self._coll.replace_one({'_id': key}, mods)
+        return await self._coll.replace_one({self.ID_Field: key}, mods)
 
     async def distinct(self, key, criteria):
-        self.db_id(criteria)
-        res = await self._coll.distinct(key, filter=self._with_tenant(criteria or {}))
+        criteria = self.modified_criteria(criteria or {})
+        res = await self._coll.distinct(key, filter=criteria)
         return self.un_db_id(res)
 
     async def remove(self, dict_or_key):
-        self._unindex(dict_or_key)
         criteria = dict_or_key
         if not isinstance(dict_or_key, dict):
             criteria = {self.ID_Field: dict_or_key}
-        res = await self._coll.delete_many(self._with_tenant(criteria))
+        else:
+            criteria = self.modified_criteria(criteria)
+        res = await self._coll.delete_many(criteria)
         return self.un_db_id(res)
 
     async def count(self, criteria=None):
-        self.db_id(criteria)
-        return await self._coll.count_documents(self._with_tenant(criteria))
+        criteria = self.modified_criteria(criteria or {})
+        return await self._coll.count_documents(criteria)
 
-    def modified_criteria(self, criteria):
-        '''
-        Works on presumption of non-commpaund criteria.  May need to get fancier later
-        :param criteria:
-        :return:
-        '''
-        criteria = super().modified_criteria(criteria)
-        keys = list(criteria.keys())
-        key = keys[0] if keys else None
-        if key in ('$gt', '$gte', '$lt', '$lte', '$eq', '$neq'):
-            prop, val = criteria[key]
-            return {prop: {key: val}}
-        return criteria
 
     async def find_one(self, criteria=None):
-        criteria = criteria or {}
-        filter = self._with_tenant(self.modified_criteria(criteria))
-        res = await self._coll.find_one(filter)
+        criteria = self.modified_criteria(criteria or {})
+        res = await self._coll.find_one(criteria)
         return self.un_db_id(res)
 
     async def find(self, criteria=None, only_cols=None,
                    order_by=None, limit=None, ids_only=False):
         kwargs = {}
         criteria = criteria or {}
-        kwargs['filter'] = self._with_tenant(self.modified_criteria(criteria))
+        kwargs['filter'] = self.modified_criteria(criteria)
         if limit == 1:
             order_by = None
         if ids_only:
@@ -120,11 +107,8 @@ class MongoCollection(base.MongoCollection):
             return [x[only_cols[0]] for x in data]
         return [self.un_db_id(d) for d in data]
 
-    async def bulk_load(self, ids):
-        return await self.find({'_id': {'$in': ids}})
 
-
-class MongoUOP(database.Database):
+class MongoUOP(async_database.Database):
     @classmethod
     def make_test_database(cls):
         return cls.make_named_database('testdb%d' % random.randint(1, 10000))
@@ -133,48 +117,87 @@ class MongoUOP(database.Database):
     def make_named_database(cls, name):
         return cls(dbname=name)
 
-    def __init__(self, dbname, **kwargs):
-        self._host = kwargs.get('host', 'localhost')
-        self._port = kwargs.get('port', 27017)
+    @classmethod
+    def get_client(cls, **kwargs):
+        host = kwargs.get('host', 'localhost')
+        port = kwargs.get('port', 27017)
+        args = dict(
+            host = host,
+            port = port,
+        )
+        username = kwargs.get('username')
+        password = kwargs.get('password')
+        if username and password:
+            args['username'] = username
+            args['password'] = password
+        args['authSource'] = kwargs.get('authSource', 'admin')
+        client = pymongo.AsyncMongoClient(**args)
+        return client, args
+
+    def __init__(self, dbname, *schemas, tenant_id=None, **kwargs):
+        kwargs.setdefault('host', 'localhost')
+        kwargs.setdefault('port', 27017)
         self._db_name = dbname
-        self._client = motor.motor_asyncio.AsyncIOMotorClient(host=self._host, port=self._port)
-        self._cached_collections = {}
-        super(MongoUOP, self).__init__(**kwargs)
+        self._session = None
+        self._credentials = kwargs
+        self._db = None
+        self._client:pymongo.AsyncMongoClient = None
+        super().__init__(*schemas, tenant_id=tenant_id,  **kwargs)
+
 
 
     async def drop_database(self):
         await self._client.drop_database(self._db)
 
-    async def get_raw_collection(self, name, anIndex=None):
-        '''indexed: if True then index at least on _id also on user_id if multiple_users
-        Gets a database specific collection creating any corresponding database
-        artifacts necessary to support a collection.
-        :param name: name of the collection / database artifact.
-        :param anIndex: not None then ensure the index specidief
-        :return:
-        '''
-        mongo_collection = None
-        return self._db[name]
+    async def drop_and_close(self):
+        await self.drop_database()
+        await self._client.close()
 
-    async def get_managed_collection(self, name, tenant_modifier=None):
-        raw = await self.get_raw_collection(name)
-        return MongoCollection(raw, tenant_modifier=tenant_modifier)
+    async def get_raw_collection(self, name, schema=None):
+    
+        if name in await self._db.list_collection_names():
+            return self._db[name]
+        return await self._db.create_collection(name)  # very simple in mongo
 
-    def _db_has_collection(self, name):
-        return name in self._db.collection_names()
+    def wrap_raw_collection(self, raw):
+        return MongoCollection(raw)
+        
+    async def _db_has_collection(self, name):
+        return name in await self._db.list_collection_names()
 
-    def open_db(self, setup=None):
+    async def open_db(self, setup=None):
+        self._client, args = self.get_client(**self._credentials)
         self._db = self._client.get_database(self._db_name)
-
-    def commit(self):
-        'as everything is pushed as we go there is not an extra commit operation'
-        pass
-
-    def begin_transaction(self):
+        await super().open_db()
+        
+    async def start_long_transaction(self):
         """
         Mongodb doesn't have transaction support.  But we can fake it by keeping reverse information for the
         set of changes to be imposed by processing changes.  Note that this mechanism will not handle nested txn
         currently.  Many systems do nested txn by simply ignoring the nesting and only really committing at the
         top level anyway.
         """
-        pass
+        self._session = self._client.start_session()
+        await self._session.start_transaction()
+        return self._session
+
+    async def rollback_transaction(self):
+        """Rollback the current transaction"""
+        if self._session:
+            await self._session.abort_transaction()
+            await self._session.end_session()
+            self._session = None
+
+    async def abort(self):
+        await self.rollback_transaction()
+        await super().abort()
+
+    async def commit_transaction(self):
+        if self._session:
+            await self._session.commit_transaction()  
+            await self._session.end_session()
+            self._session = None
+
+    async def really_commit(self):
+        await self._session.commit_transaction()
+        await self.end_long_transaction()

@@ -6,10 +6,10 @@ from sjasoft.utils.logging import getLogger
 from sjasoft.utils.dicts import first_kv
 from uop.core import database
 from uop.core import db_collection as db_coll
-import re
+import re, logging
 
+logging.getLogger("pymongo").setLevel(logging.INFO)
 logging = getLogger('mongouop')
-
 
 class MongoCollection(db_coll.DBCollection):
     ID_Field = '_id'
@@ -18,8 +18,7 @@ class MongoCollection(db_coll.DBCollection):
         super().__init__(base_collection, indexed=indexed)
 
     def column_class_check(self, column, uuid):
-        regex = re.compile(f'_{uuid}$')
-        cls_expr = {'$regex': regex}
+        cls_expr = {'$regex': f'{uuid}$'}
         return {column: cls_expr}
 
     def update(self, criteria, mods, partial=True):
@@ -55,7 +54,7 @@ class MongoCollection(db_coll.DBCollection):
     def update_one(self, key, mods, partial=True):
         if partial:
             mods = {'$set': mods}
-        self._coll.update_one({'_id': key}, mods)
+        self._coll.update_one({self.ID_Field: key}, mods)
 
     def insert(self, **object_data):
         self.db_id(object_data)
@@ -63,20 +62,19 @@ class MongoCollection(db_coll.DBCollection):
         return self._coll.insert_one(object_data)
 
     def bulk_load(self, ids):
-        return self.un_db_id(self.find({'uuid': {'$in': ids}}))
+        return self.un_db_id(self.find({self.ID_Field: {'$in': ids}}))
 
     def distinct(self, key, criteria):
-        self.db_id(criteria)
-        res = self._coll.distinct(key, filter=criteria or {})
+        criteria = self.modified_criteria(criteria or {})
+        res = self._coll.distinct(key, filter=criteria)
         return self.un_db_id(res)
 
     def remove(self, dict_or_key):
-        self._unindex(dict_or_key)
         criteria = dict_or_key
         if not isinstance(dict_or_key, dict):
             criteria = {self.ID_Field: dict_or_key}
         else:
-            self.db_id(criteria)
+            criteria = self.modified_criteria(criteria)
         res = self._coll.delete_many(criteria)
         return self.un_db_id(res)
 
@@ -104,6 +102,8 @@ class MongoCollection(db_coll.DBCollection):
         elif key == 'endswith':
             prop, val = first_kv(criteria[key])
             return self.column_class_check(prop, val)
+        else:
+            return criteria
 
     def find_one(self, criteria=None):
         criteria = criteria or {}
@@ -168,6 +168,7 @@ class MongoUOP(database.Database):
         if username and password:
             args['username'] = username
             args['password'] = password
+        args['authSource'] = kwargs.get('authSource', 'admin')
         client = pymongo.MongoClient(**args)
         return client, args
 
@@ -177,6 +178,8 @@ class MongoUOP(database.Database):
         client.drop_database(name)
 
     def __init__(self, dbname, *schemas, tenant_id=None, **kwargs):
+        kwargs.setdefault('host', 'localhost')
+        kwargs.setdefault('port', 27017)
         self._db_name = dbname
         self._session = None
         self._credentials = kwargs
@@ -189,7 +192,7 @@ class MongoUOP(database.Database):
         return res
 
     def drop_and_close(self):
-        self.drop_database(self._db.name)
+        self.drop_database()
         self._client.close()
         
     def get_raw_collection(self, name, schema=None):
